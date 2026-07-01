@@ -14,12 +14,14 @@ export const grainLevels = {
 
 export type GrainLevel = keyof typeof grainLevels | 'custom';
 
+export const DEFAULT_PRESET_ID = 'haze';
+
 export const presets: Preset[] = [
   {
     id: 'haze',
     name: 'Haze',
     params: {
-      blur: { intensity: 85, type: 'gaussian', tiltSpread: 50 },
+      blur: { intensity: 80, type: 'gaussian', tiltSpread: 50 },
       grain: { intensity: grainLevels.low },
     },
   },
@@ -27,7 +29,7 @@ export const presets: Preset[] = [
     id: 'memory',
     name: 'Memory',
     params: {
-      blur: { intensity: 45, type: 'gaussian', tiltSpread: 50 },
+      blur: { intensity: 64, type: 'gaussian', tiltSpread: 50 },
       grain: { intensity: grainLevels.medium },
     },
   },

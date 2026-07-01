@@ -2,57 +2,63 @@ import * as twgl from 'twgl.js';
 import vertexShader from './shaders/quad.vert.glsl';
 import blurFrag from './shaders/blur.frag.glsl';
 import grainFrag from './shaders/grain.frag.glsl';
+import copyFrag from './shaders/copy.frag.glsl';
+import type { AspectRatio } from './outputSize';
+import {
+  createRenderConfig,
+  computeBlurRadius,
+  BLUR_SAMPLE_CAP,
+  DEFAULT_GRAIN_SEED,
+  type RenderConfig,
+} from './renderConfig';
+import { type GrainWashParams } from './types';
 
-export interface GrainWashParams {
-  blur: {
-    intensity: number;    // 0–100
-    type: 'gaussian' | 'tilt-shift';
-    tiltSpread: number;   // 0–100 (how wide the sharp band is)
-  };
-  grain: {
-    intensity: number;    // 0–100
-  };
-}
+export type { AspectRatio } from './outputSize';
+export { getOutputSize, calculateCropRegion } from './outputSize';
+export { createRenderConfig, computeBlurRadius } from './renderConfig';
+export { defaultParams, type GrainWashParams } from './types';
 
-export type AspectRatio = '4:3' | '16:9' | '9:16' | '3:4' | '1:1' | 'original';
-
-export const defaultParams: GrainWashParams = {
-  blur: { intensity: 50, type: 'gaussian', tiltSpread: 50 },
-  grain: { intensity: 35 },
-};
-
+/**
+ * Single render path at full output resolution.
+ * Blur runs at half resolution (visually equivalent) then upsamples before grain.
+ */
 export class GrainWashRenderer {
   private gl: WebGLRenderingContext;
   private canvas: HTMLCanvasElement;
   private bufferInfo: twgl.BufferInfo;
 
+  private copyProgram: twgl.ProgramInfo;
   private blurProgram: twgl.ProgramInfo;
   private grainProgram: twgl.ProgramInfo;
 
   private fbA: twgl.FramebufferInfo | null = null;
   private fbB: twgl.FramebufferInfo | null = null;
+  private fbHalfA: twgl.FramebufferInfo | null = null;
+  private fbHalfB: twgl.FramebufferInfo | null = null;
 
   private sourceTexture: WebGLTexture | null = null;
   private sourceImage: HTMLImageElement | null = null;
 
   private sourceWidth = 0;
   private sourceHeight = 0;
-  private cropWidth = 0;
-  private cropHeight = 0;
-  private cropOffsetX = 0;
-  private cropOffsetY = 0;
   private activeAspect: AspectRatio = 'original';
-  private cropCanvas: HTMLCanvasElement | null = null;
-  private cropCtx: CanvasRenderingContext2D | null = null;
+  private grainSeed = DEFAULT_GRAIN_SEED;
 
-  private previewMaxDim: number | null = null;
-  private grainSeed = 42.0; // static seed — grain doesn't move
+  private normalizedCanvas: HTMLCanvasElement | null = null;
+  private normalizedCtx: CanvasRenderingContext2D | null = null;
+  private normalizedCacheKey = '';
+
+  private blurCacheKey = '';
+  private blurCacheTexture: WebGLTexture | null = null;
+  private sourceTextureKey = '';
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const gl = canvas.getContext('webgl', {
       preserveDrawingBuffer: true,
       premultipliedAlpha: false,
+      powerPreference: 'high-performance',
+      antialias: false,
     });
     if (!gl) throw new Error('WebGL not supported');
     this.gl = gl;
@@ -61,86 +67,57 @@ export class GrainWashRenderer {
       position: { numComponents: 2, data: [-1, -1, 1, -1, -1, 1, 1, 1] },
     });
 
+    this.copyProgram = twgl.createProgramInfo(gl, [vertexShader, copyFrag]);
     this.blurProgram = twgl.createProgramInfo(gl, [vertexShader, blurFrag]);
     this.grainProgram = twgl.createProgramInfo(gl, [vertexShader, grainFrag]);
   }
 
-  private createFramebuffers(width: number, height: number) {
+  private invalidateCaches() {
+    this.normalizedCacheKey = '';
+    this.sourceTextureKey = '';
+    this.blurCacheKey = '';
+    this.blurCacheTexture = null;
+  }
+
+  private deleteFramebuffer(fb: twgl.FramebufferInfo | null) {
+    if (!fb) return;
     const gl = this.gl;
-    if (this.fbA) {
-      gl.deleteTexture(this.fbA.attachments[0]);
-      gl.deleteFramebuffer(this.fbA.framebuffer);
-    }
-    if (this.fbB) {
-      gl.deleteTexture(this.fbB.attachments[0]);
-      gl.deleteFramebuffer(this.fbB.framebuffer);
-    }
-
-    const createFB = () =>
-      twgl.createFramebufferInfo(gl, [{
-        format: gl.RGBA,
-        type: gl.UNSIGNED_BYTE,
-        min: gl.LINEAR,
-        mag: gl.LINEAR,
-        wrap: gl.CLAMP_TO_EDGE,
-      }], width, height);
-
-    this.fbA = createFB();
-    this.fbB = createFB();
+    gl.deleteTexture(fb.attachments[0]);
+    gl.deleteFramebuffer(fb.framebuffer);
   }
 
-  private calculateCrop(ratio: AspectRatio) {
-    const imgW = this.sourceWidth;
-    const imgH = this.sourceHeight;
-
-    if (ratio === 'original') {
-      this.cropWidth = imgW;
-      this.cropHeight = imgH;
-      this.cropOffsetX = 0;
-      this.cropOffsetY = 0;
-      return;
-    }
-
-    const ratioMap: Record<string, number> = {
-      '4:3': 4 / 3, '16:9': 16 / 9, '9:16': 9 / 16,
-      '3:4': 3 / 4, '1:1': 1,
-    };
-
-    const targetRatio = ratioMap[ratio];
-    const imgRatio = imgW / imgH;
-
-    if (imgRatio > targetRatio) {
-      this.cropHeight = imgH;
-      this.cropWidth = Math.round(imgH * targetRatio);
-      this.cropOffsetX = Math.round((imgW - this.cropWidth) / 2);
-      this.cropOffsetY = 0;
-    } else {
-      this.cropWidth = imgW;
-      this.cropHeight = Math.round(imgW / targetRatio);
-      this.cropOffsetX = 0;
-      this.cropOffsetY = Math.round((imgH - this.cropHeight) / 2);
-    }
+  private createFramebuffer(width: number, height: number) {
+    const gl = this.gl;
+    return twgl.createFramebufferInfo(gl, [{
+      format: gl.RGBA,
+      type: gl.UNSIGNED_BYTE,
+      min: gl.LINEAR,
+      mag: gl.LINEAR,
+      wrap: gl.CLAMP_TO_EDGE,
+    }], width, height);
   }
 
-  private setCanvasToCurrentOutputSize() {
-    if (!this.cropWidth || !this.cropHeight) return;
+  private createFramebuffers(width: number, height: number) {
+    this.deleteFramebuffer(this.fbA);
+    this.deleteFramebuffer(this.fbB);
+    this.deleteFramebuffer(this.fbHalfA);
+    this.deleteFramebuffer(this.fbHalfB);
 
-    let w = this.cropWidth;
-    let h = this.cropHeight;
+    this.fbA = this.createFramebuffer(width, height);
+    this.fbB = this.createFramebuffer(width, height);
 
-    if (this.previewMaxDim) {
-      const aspect = this.cropWidth / this.cropHeight;
-      if (this.cropWidth > this.cropHeight) {
-        w = Math.min(this.cropWidth, this.previewMaxDim);
-        h = w / aspect;
-      } else {
-        h = Math.min(this.cropHeight, this.previewMaxDim);
-        w = h * aspect;
-      }
-    }
+    const hw = Math.max(1, Math.round(width / 2));
+    const hh = Math.max(1, Math.round(height / 2));
+    this.fbHalfA = this.createFramebuffer(hw, hh);
+    this.fbHalfB = this.createFramebuffer(hw, hh);
 
-    const cw = Math.max(1, Math.round(w));
-    const ch = Math.max(1, Math.round(h));
+    this.blurCacheKey = '';
+    this.blurCacheTexture = null;
+  }
+
+  private ensureCanvasSize(width: number, height: number) {
+    const cw = Math.max(1, Math.round(width));
+    const ch = Math.max(1, Math.round(height));
     if (this.canvas.width !== cw || this.canvas.height !== ch) {
       this.canvas.width = cw;
       this.canvas.height = ch;
@@ -164,24 +141,59 @@ export class GrainWashRenderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
   }
 
-  private getCroppedSource(): HTMLImageElement | HTMLCanvasElement | null {
+  private normalizedSourceKey(cfg: RenderConfig): string {
+    const { outputSize, cropRegion, aspect } = cfg;
+    return [
+      aspect,
+      this.sourceWidth,
+      this.sourceHeight,
+      outputSize.width,
+      outputSize.height,
+      cropRegion.x,
+      cropRegion.y,
+      cropRegion.width,
+      cropRegion.height,
+    ].join(':');
+  }
+
+  private buildNormalizedSource(cfg: RenderConfig): HTMLCanvasElement | null {
     if (!this.sourceImage) return null;
-    if (this.activeAspect === 'original') return this.sourceImage;
 
-    if (!this.cropCanvas) {
-      this.cropCanvas = document.createElement('canvas');
-      this.cropCtx = this.cropCanvas.getContext('2d');
+    const key = this.normalizedSourceKey(cfg);
+    if (key === this.normalizedCacheKey && this.normalizedCanvas) {
+      return this.normalizedCanvas;
     }
-    if (!this.cropCtx) return this.sourceImage;
 
-    this.cropCanvas.width = this.cropWidth;
-    this.cropCanvas.height = this.cropHeight;
-    this.cropCtx.drawImage(
+    const { outputSize, cropRegion } = cfg;
+    const { width: ow, height: oh } = outputSize;
+
+    if (!this.normalizedCanvas) {
+      this.normalizedCanvas = document.createElement('canvas');
+      this.normalizedCtx = this.normalizedCanvas.getContext('2d', {
+        alpha: false,
+        desynchronized: true,
+      });
+    }
+    if (!this.normalizedCtx) return null;
+
+    this.normalizedCanvas.width = ow;
+    this.normalizedCanvas.height = oh;
+    this.normalizedCtx.drawImage(
       this.sourceImage,
-      this.cropOffsetX, this.cropOffsetY, this.cropWidth, this.cropHeight,
-      0, 0, this.cropWidth, this.cropHeight,
+      cropRegion.x, cropRegion.y, cropRegion.width, cropRegion.height,
+      0, 0, ow, oh,
     );
-    return this.cropCanvas;
+    this.normalizedCacheKey = key;
+    return this.normalizedCanvas;
+  }
+
+  private blurCacheKeyFor(params: GrainWashParams, w: number, h: number): string {
+    return [
+      w, h,
+      params.blur.intensity,
+      params.blur.type,
+      params.blur.tiltSpread,
+    ].join(':');
   }
 
   loadImage(img: HTMLImageElement) {
@@ -189,26 +201,31 @@ export class GrainWashRenderer {
     this.sourceWidth = img.naturalWidth;
     this.sourceHeight = img.naturalHeight;
     this.activeAspect = 'original';
-    this.calculateCrop('original');
-    this.setCanvasToCurrentOutputSize();
-    const source = this.getCroppedSource();
-    if (source) this.updateTextureFrom(source);
+    this.invalidateCaches();
   }
 
   setAspectRatio(ratio: AspectRatio) {
     if (!this.sourceImage) return;
     this.activeAspect = ratio;
-    this.calculateCrop(ratio);
-    this.setCanvasToCurrentOutputSize();
-    const source = this.getCroppedSource();
-    if (source) this.updateTextureFrom(source);
+    this.invalidateCaches();
+  }
+
+  getRenderConfig(params: GrainWashParams): RenderConfig | null {
+    if (!this.sourceImage) return null;
+    return createRenderConfig(
+      params,
+      this.activeAspect,
+      this.sourceWidth,
+      this.sourceHeight,
+      this.grainSeed,
+    );
   }
 
   private renderPass(
     program: twgl.ProgramInfo,
     inputTexture: WebGLTexture,
     outputFB: twgl.FramebufferInfo | null,
-    uniforms: Record<string, any>
+    uniforms: Record<string, unknown> = {},
   ) {
     const gl = this.gl;
     gl.useProgram(program.program);
@@ -217,6 +234,7 @@ export class GrainWashRenderer {
 
     if (outputFB) {
       twgl.bindFramebufferInfo(gl, outputFB);
+      gl.viewport(0, 0, outputFB.width, outputFB.height);
     } else {
       twgl.bindFramebufferInfo(gl, null);
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
@@ -225,109 +243,169 @@ export class GrainWashRenderer {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  render(params: GrainWashParams) {
-    if (!this.sourceImage || !this.fbA || !this.fbB) return;
-
-    const source = this.getCroppedSource();
-    if (source) this.updateTextureFrom(source);
-    if (!this.sourceTexture) return;
-
-    const gl = this.gl;
-    const w = this.canvas.width;
-    const h = this.canvas.height;
-    gl.viewport(0, 0, w, h);
-
-    let currentTexture: WebGLTexture = this.sourceTexture;
-    let writeFB = this.fbA;
-    let readFB = this.fbB;
+  private runBlurAtResolution(
+    params: GrainWashParams,
+    inputTexture: WebGLTexture,
+    w: number,
+    h: number,
+    writeFB: twgl.FramebufferInfo,
+    readFB: twgl.FramebufferInfo,
+  ): WebGLTexture {
+    let currentTexture = inputTexture;
+    let write = writeFB;
+    let read = readFB;
 
     const swap = () => {
-      currentTexture = writeFB!.attachments[0] as WebGLTexture;
-      const tmp = writeFB;
-      writeFB = readFB;
-      readFB = tmp;
+      currentTexture = write.attachments[0] as WebGLTexture;
+      const tmp = write;
+      write = read;
+      read = tmp;
     };
 
-    // --- BLUR ---
-    const totalRadius = (params.blur.intensity / 100) * 150;
+    const totalRadius = computeBlurRadius(params.blur.intensity, w, h);
     const isTiltShift = params.blur.type === 'tilt-shift' ? 1.0 : 0.0;
-    // Map tiltSpread 0-100 to shader value 0.05-0.5
-    // Low spread = narrow sharp band, high spread = wide sharp band
     const tiltSpreadValue = 0.05 + (params.blur.tiltSpread / 100) * 0.45;
 
-    if (totalRadius >= 0.5) {
-      const MAX_PER_PASS = 90;
-      const numRounds = Math.max(1, Math.ceil(totalRadius / MAX_PER_PASS));
-      const perRoundRadius = totalRadius / Math.sqrt(numRounds);
+    if (totalRadius < 0.5) return inputTexture;
 
-      for (let r = 0; r < numRounds; r++) {
-        this.renderPass(this.blurProgram, currentTexture, writeFB, {
-          uDirection: [1.0, 0.0],
-          uResolution: [w, h],
-          uRadius: perRoundRadius,
-          uBlurType: isTiltShift,
-          uTiltCenter: 0.5,
-          uTiltSpread: tiltSpreadValue,
-        });
-        swap();
+    const MAX_PER_PASS = 90;
+    const numRounds = Math.max(1, Math.ceil(totalRadius / MAX_PER_PASS));
+    const perRoundRadius = totalRadius / Math.sqrt(numRounds);
 
-        this.renderPass(this.blurProgram, currentTexture, writeFB, {
-          uDirection: [0.0, 1.0],
-          uResolution: [w, h],
-          uRadius: perRoundRadius,
-          uBlurType: isTiltShift,
-          uTiltCenter: 0.5,
-          uTiltSpread: tiltSpreadValue,
-        });
-        swap();
+    const blurUniforms = {
+      uResolution: [w, h],
+      uRadius: perRoundRadius,
+      uBlurType: isTiltShift,
+      uTiltCenter: 0.5,
+      uTiltSpread: tiltSpreadValue,
+      uSampleCap: BLUR_SAMPLE_CAP,
+    };
+
+    for (let r = 0; r < numRounds; r++) {
+      this.renderPass(this.blurProgram, currentTexture, write, {
+        ...blurUniforms,
+        uDirection: [1.0, 0.0],
+      });
+      swap();
+
+      this.renderPass(this.blurProgram, currentTexture, write, {
+        ...blurUniforms,
+        uDirection: [0.0, 1.0],
+      });
+      swap();
+    }
+
+    return currentTexture;
+  }
+
+  private runBlurPasses(
+    params: GrainWashParams,
+    inputTexture: WebGLTexture,
+    w: number,
+    h: number,
+  ): WebGLTexture {
+    const cacheKey = this.blurCacheKeyFor(params, w, h);
+    if (cacheKey === this.blurCacheKey && this.blurCacheTexture) {
+      return this.blurCacheTexture;
+    }
+
+    const totalRadius = computeBlurRadius(params.blur.intensity, w, h);
+    if (totalRadius < 0.5) {
+      this.blurCacheKey = cacheKey;
+      this.blurCacheTexture = inputTexture;
+      return inputTexture;
+    }
+
+    const hw = this.fbHalfA!.width;
+    const hh = this.fbHalfA!.height;
+
+    // Downsample → blur at half res → upsample to full res (fbA).
+    this.renderPass(this.copyProgram, inputTexture, this.fbHalfA!);
+
+    const halfRadius = computeBlurRadius(params.blur.intensity, hw, hh);
+    const blurredHalf = halfRadius < 0.5
+      ? (this.fbHalfA!.attachments[0] as WebGLTexture)
+      : this.runBlurAtResolution(
+          params,
+          this.fbHalfA!.attachments[0] as WebGLTexture,
+          hw,
+          hh,
+          this.fbHalfB!,
+          this.fbHalfA!,
+        );
+
+    this.renderPass(this.copyProgram, blurredHalf, this.fbA!);
+    const fullResBlurred = this.fbA!.attachments[0] as WebGLTexture;
+
+    this.blurCacheKey = cacheKey;
+    this.blurCacheTexture = fullResBlurred;
+    return fullResBlurred;
+  }
+
+  renderToCanvas(params: GrainWashParams, config?: RenderConfig) {
+    const cfg = config ?? this.getRenderConfig(params);
+    if (!cfg || !this.sourceImage) return;
+
+    const { outputSize } = cfg;
+    const w = outputSize.width;
+    const h = outputSize.height;
+
+    this.ensureCanvasSize(w, h);
+
+    const blurKey = this.blurCacheKeyFor(params, w, h);
+    const canReuseBlur = blurKey === this.blurCacheKey && this.blurCacheTexture !== null;
+
+    if (!canReuseBlur) {
+      const normalized = this.buildNormalizedSource(cfg);
+      if (!normalized) return;
+
+      const srcKey = this.normalizedCacheKey;
+      if (srcKey !== this.sourceTextureKey) {
+        this.updateTextureFrom(normalized);
+        this.sourceTextureKey = srcKey;
+        this.blurCacheKey = '';
+        this.blurCacheTexture = null;
       }
     }
 
-    // --- GRAIN (final → screen) ---
+    if (!this.sourceTexture || !this.fbA || !this.fbB || !this.fbHalfA || !this.fbHalfB) return;
+
+    const currentTexture = canReuseBlur
+      ? this.blurCacheTexture!
+      : this.runBlurPasses(params, this.sourceTexture, w, h);
+
     this.renderPass(this.grainProgram, currentTexture, null, {
       uIntensity: params.grain.intensity / 100,
       uSize: 0.0,
       uMono: 1.0,
-      uSeed: this.grainSeed,
+      uSeed: cfg.grainSeed,
       uResolution: [w, h],
     });
   }
 
-  async export(
-    params: GrainWashParams,
+  render(params: GrainWashParams) {
+    this.renderToCanvas(params);
+  }
+
+  export(
     format: 'png' | 'jpeg' | 'webp' = 'png',
-    quality = 0.92
+    quality = 0.92,
   ): Promise<Blob> {
-    this.render(params);
     return new Promise((resolve, reject) => {
       this.canvas.toBlob(
         (blob) => { if (blob) resolve(blob); else reject(new Error('Export failed')); },
         `image/${format}`,
-        quality
+        quality,
       );
     });
-  }
-
-  setPreviewSize(maxDim: number) {
-    this.previewMaxDim = maxDim;
-    this.setCanvasToCurrentOutputSize();
-  }
-
-  setFullResolution() {
-    this.previewMaxDim = null;
-    this.setCanvasToCurrentOutputSize();
   }
 
   destroy() {
     const gl = this.gl;
     if (this.sourceTexture) gl.deleteTexture(this.sourceTexture);
-    if (this.fbA) {
-      gl.deleteTexture(this.fbA.attachments[0]);
-      gl.deleteFramebuffer(this.fbA.framebuffer);
-    }
-    if (this.fbB) {
-      gl.deleteTexture(this.fbB.attachments[0]);
-      gl.deleteFramebuffer(this.fbB.framebuffer);
-    }
+    this.deleteFramebuffer(this.fbA);
+    this.deleteFramebuffer(this.fbB);
+    this.deleteFramebuffer(this.fbHalfA);
+    this.deleteFramebuffer(this.fbHalfB);
   }
 }

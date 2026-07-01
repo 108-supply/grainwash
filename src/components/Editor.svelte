@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy, tick } from 'svelte';
   import { GrainWashRenderer, defaultParams, type GrainWashParams, type AspectRatio } from '../engine/renderer';
-  import { presets } from '../presets';
+  import { presets, DEFAULT_PRESET_ID } from '../presets';
   import Controls from './Controls.svelte';
   import PresetPanel from './PresetPanel.svelte';
   import ExportButton from './ExportButton.svelte';
@@ -13,34 +13,85 @@
   let params: GrainWashParams = JSON.parse(JSON.stringify(defaultParams));
   let imageLoaded = false;
   let isDragging = false;
-  let activePreset: string | null = null;
+  let activePreset: string | null = DEFAULT_PRESET_ID;
   let activeAspect: AspectRatio = 'original';
   let fileName = 'Untitled image';
 
-  const PREVIEW_MAX_DIM = 1400;
+  let renderFrame: number | null = null;
+  let pendingParams: GrainWashParams | null = null;
 
   onMount(() => {
     renderer = new GrainWashRenderer(canvas);
+    window.addEventListener('paste', onPaste);
   });
 
   onDestroy(() => {
+    window.removeEventListener('paste', onPaste);
+    if (renderFrame !== null) cancelAnimationFrame(renderFrame);
     renderer?.destroy();
   });
 
-  function handleFile(file: File) {
+  function renderNow(p: GrainWashParams = params) {
+    renderer?.render(p);
+  }
+
+  function scheduleRender(p: GrainWashParams = params) {
+    pendingParams = p;
+    if (renderFrame !== null) return;
+    renderFrame = requestAnimationFrame(() => {
+      renderFrame = null;
+      const next = pendingParams;
+      pendingParams = null;
+      if (next) renderNow(next);
+      if (pendingParams) scheduleRender();
+    });
+  }
+
+  function flushRender(p: GrainWashParams = params) {
+    if (renderFrame !== null) {
+      cancelAnimationFrame(renderFrame);
+      renderFrame = null;
+    }
+    pendingParams = null;
+    renderNow(p);
+  }
+
+  function handleFile(file: File, name?: string) {
     if (!file.type.startsWith('image/')) return;
 
     const img = new Image();
     img.onload = async () => {
       renderer?.loadImage(img);
       if (activeAspect !== 'original') renderer?.setAspectRatio(activeAspect);
-      renderer?.setPreviewSize(PREVIEW_MAX_DIM);
-      renderer?.render(params);
-      fileName = file.name;
+      flushRender(params);
+      fileName = name ?? file.name;
       imageLoaded = true;
       await tick();
     };
     img.src = URL.createObjectURL(file);
+  }
+
+  function onPaste(e: ClipboardEvent) {
+    const target = e.target as HTMLElement | null;
+    if (
+      target?.tagName === 'INPUT' ||
+      target?.tagName === 'TEXTAREA' ||
+      target?.isContentEditable
+    ) {
+      return;
+    }
+
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (!item.type.startsWith('image/')) continue;
+      const file = item.getAsFile();
+      if (!file) continue;
+      e.preventDefault();
+      handleFile(file, 'Pasted image');
+      return;
+    }
   }
 
   function onFileInput(e: Event) {
@@ -64,7 +115,7 @@
   function onParamsChange(newParams: GrainWashParams) {
     params = newParams;
     activePreset = null;
-    renderer?.render(params);
+    scheduleRender(params);
   }
 
   function onPresetSelect(presetId: string) {
@@ -72,15 +123,14 @@
     if (preset) {
       params = JSON.parse(JSON.stringify(preset.params));
       activePreset = presetId;
-      renderer?.render(params);
+      flushRender(params);
     }
   }
 
   function onAspectChange(ratio: AspectRatio) {
     activeAspect = ratio;
     renderer?.setAspectRatio(ratio);
-    renderer?.setPreviewSize(PREVIEW_MAX_DIM);
-    renderer?.render(params);
+    flushRender(params);
   }
 
   function downloadBlob(blob: Blob, extension: string) {
@@ -95,17 +145,15 @@
 
   async function onExport(detail: { format: 'png' | 'jpeg' | 'webp' }) {
     if (!renderer) return;
-    renderer.setFullResolution();
-    const blob = await renderer.export(params, detail.format);
-    renderer.setPreviewSize(PREVIEW_MAX_DIM);
-    renderer.render(params);
+    flushRender(params);
+    const blob = await renderer.export(detail.format);
     const ext = detail.format === 'jpeg' ? 'jpg' : detail.format;
     downloadBlob(blob, ext);
   }
 
   function removeImage() {
     imageLoaded = false;
-    activePreset = null;
+    activePreset = DEFAULT_PRESET_ID;
     activeAspect = 'original';
     fileName = 'Untitled image';
     params = JSON.parse(JSON.stringify(defaultParams));
@@ -143,7 +191,7 @@
         <path d="M5 15v3.5A2.5 2.5 0 0 0 7.5 21h9A2.5 2.5 0 0 0 19 18.5V15" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
       </svg>
       <span>Drop your image here</span>
-      <small>or click to browse</small>
+      <small>or click to browse · paste from clipboard</small>
     </button>
 
     <div class="gw-privacy">
@@ -322,7 +370,7 @@
     position: relative;
     border-radius: 24px;
     overflow: hidden;
-    background: #0A0A0C;
+    background: #000000;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -330,10 +378,11 @@
 
   .gw-canvas {
     display: block;
-    max-width: 100%;
-    max-height: calc(100vh - 40px);
+    max-width: 70%;
+    max-height: calc((100vh - 40px) * 0.7);
+    width: auto;
+    height: auto;
     border-radius: 24px;
-    object-fit: contain;
   }
 
   .gw-image-actions {
@@ -415,7 +464,8 @@
       min-height: 100vh;
       overflow-y: auto;
     }
-    .gw-preview-card { height: 50vh; min-height: 300px; }
+    .gw-preview-card { height: 50vh; min-height: 300px; background: #000000; }
+    .gw-canvas { max-width: 70%; max-height: calc(50vh * 0.7); }
     .gw-sidebar { height: auto; }
     .gw-sidebar-scroll { padding: 32px; }
   }
@@ -427,8 +477,8 @@
     .gw-demo-arrow { inset: 0 76px auto; width: calc(100% - 152px); height: 112px; }
     .gw-start-copy h1 { font-size: 48px; line-height: 0.94; letter-spacing: -0.045em; }
     .gw-workspace { padding: 8px; gap: 8px; }
-    .gw-preview-card { height: 45vh; border-radius: 18px; }
-    .gw-canvas { border-radius: 18px; }
+    .gw-preview-card { height: 45vh; border-radius: 18px; background: #000000; }
+    .gw-canvas { border-radius: 18px; max-width: 70%; max-height: calc(45vh * 0.7); }
     .gw-sidebar-scroll { padding: 24px; }
   }
 </style>

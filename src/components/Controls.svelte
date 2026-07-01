@@ -7,7 +7,7 @@
 
   const dispatch = createEventDispatcher<{ change: GrainWashParams }>();
 
-  let grainLevel: GrainLevel = 'medium';
+  let grainLevel: GrainLevel = 'low';
 
   $: {
     if (params.grain.intensity === grainLevels.low) grainLevel = 'low';

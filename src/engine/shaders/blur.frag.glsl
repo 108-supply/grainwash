@@ -8,6 +8,7 @@ uniform float uRadius;
 uniform float uBlurType;
 uniform float uTiltCenter;
 uniform float uTiltSpread;
+uniform float uSampleCap;
 
 float gaussian(float x, float sigma) {
   return exp(-(x * x) / (2.0 * sigma * sigma));
@@ -33,19 +34,26 @@ void main() {
 
   float sigma = max(effectiveRadius * 0.5, 1.0);
   vec2 texelSize = 1.0 / uResolution;
-  int samples = int(min(effectiveRadius, 100.0));
+  int samples = int(min(uSampleCap, effectiveRadius));
 
-  vec4 color = vec4(0.0);
-  float weightSum = 0.0;
+  float weightSum = gaussian(0.0, sigma);
+  vec4 color = texture2D(uTexture, vUv) * weightSum;
 
-  // Loop supports up to radius 100
-  for (int i = -100; i <= 100; i++) {
-    if (i > samples || i < -samples) continue;
-    float fi = float(i);
-    float weight = gaussian(fi, sigma);
-    vec2 offset = uDirection * texelSize * fi;
-    color += texture2D(uTexture, vUv + offset) * weight;
-    weightSum += weight;
+  // Pair taps with bilinear offsets — half the texture fetches, same kernel.
+  for (int i = 0; i < 36; i++) {
+    int tap = i * 2 + 1;
+    if (tap > samples) continue;
+
+    float fi = float(tap);
+    float w0 = gaussian(fi - 1.0, sigma);
+    float w1 = gaussian(fi, sigma);
+    float pairWeight = w0 + w1;
+    float offset = fi - 1.0 + w1 / pairWeight;
+    vec2 off = uDirection * texelSize * offset;
+
+    color += texture2D(uTexture, vUv + off) * pairWeight;
+    color += texture2D(uTexture, vUv - off) * pairWeight;
+    weightSum += 2.0 * pairWeight;
   }
 
   gl_FragColor = color / weightSum;
