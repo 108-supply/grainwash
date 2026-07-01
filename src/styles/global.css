@@ -1,0 +1,53 @@
+@font-face {
+  font-family: 'Season Sans';
+  src: url('/SeasonSans-Medium.ttf') format('truetype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Geist Mono';
+  src: url('/GeistMono-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --font-heading: 'Season Sans', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  --font-body: 'Season Sans', -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif;
+  --font-label: 'Geist Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --color-bg: #0A0A0C;
+  --color-panel: #232323;
+  --color-text: #EFF1F0;
+}
+
+*,
+*::before,
+*::after {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-weight: 500;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button, input { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+img, canvas, svg { display: block; }
+::selection { background: rgba(239, 241, 240, 0.2); }
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(239, 241, 240, 0.12); border-radius: 999px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(239, 241, 240, 0.2); }
