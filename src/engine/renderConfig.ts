@@ -7,10 +7,10 @@ import {
   type Size,
 } from './outputSize';
 
-/** Calibrates slider values — blur 100 ≈ 450px radius at this long edge. */
+/** Calibrates slider values — blur 100 ≈ 675px radius at this long edge. */
 export const EFFECT_REFERENCE_LONG_EDGE = 1400;
-export const BLUR_MAX_RADIUS_AT_REFERENCE = 450;
-export const BLUR_SAMPLE_CAP = 72;
+export const BLUR_MAX_RADIUS_AT_REFERENCE = 675;
+export const BLUR_SAMPLE_CAP = 108;
 export const DEFAULT_GRAIN_SEED = 42;
 
 export interface RenderConfig {

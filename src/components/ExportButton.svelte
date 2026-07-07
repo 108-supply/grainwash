@@ -2,14 +2,16 @@
   import { createEventDispatcher } from 'svelte';
   import type { AspectRatio } from '../engine/renderer';
 
+  type ImageFormat = 'png' | 'jpeg' | 'webp';
+
   const dispatch = createEventDispatcher<{
-    export: { format: 'png' | 'jpeg' | 'webp' };
+    export: { format: ImageFormat };
     aspectChange: AspectRatio;
   }>();
 
   export let activeAspect: AspectRatio = 'original';
 
-  let format: 'png' | 'jpeg' | 'webp' = 'png';
+  let format: ImageFormat = 'png';
   let exporting = false;
 
   const aspects: { id: AspectRatio; label: string }[] = [
@@ -92,8 +94,8 @@
 
   .format-row {
     display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .choice-btn {

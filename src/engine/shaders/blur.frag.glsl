@@ -40,7 +40,7 @@ void main() {
   vec4 color = texture2D(uTexture, vUv) * weightSum;
 
   // Pair taps with bilinear offsets — half the texture fetches, same kernel.
-  for (int i = 0; i < 36; i++) {
+  for (int i = 0; i < 54; i++) {
     int tap = i * 2 + 1;
     if (tap > samples) continue;
 

@@ -6,5 +6,9 @@ export default defineConfig({
   integrations: [svelte()],
   vite: {
     plugins: [glsl()],
-  }
+    assetsInclude: ['**/*.wasm'],
+    optimizeDeps: {
+      exclude: ['@jsquash/webp', 'wasm-feature-detect'],
+    },
+  },
 });

@@ -12,6 +12,8 @@ import {
   type RenderConfig,
 } from './renderConfig';
 import { type GrainWashParams } from './types';
+import { EXPORT_QUALITY, flipWebGLPixels } from './export';
+import { encodeImageDataToWebp } from './webpExport';
 
 export type { AspectRatio } from './outputSize';
 export { getOutputSize, calculateCropRegion } from './outputSize';
@@ -176,8 +178,10 @@ export class GrainWashRenderer {
     }
     if (!this.normalizedCtx) return null;
 
-    this.normalizedCanvas.width = ow;
-    this.normalizedCanvas.height = oh;
+    if (this.normalizedCanvas.width !== ow || this.normalizedCanvas.height !== oh) {
+      this.normalizedCanvas.width = ow;
+      this.normalizedCanvas.height = oh;
+    }
     this.normalizedCtx.drawImage(
       this.sourceImage,
       cropRegion.x, cropRegion.y, cropRegion.width, cropRegion.height,
@@ -268,7 +272,7 @@ export class GrainWashRenderer {
 
     if (totalRadius < 0.5) return inputTexture;
 
-    const MAX_PER_PASS = 90;
+    const MAX_PER_PASS = 135;
     const numRounds = Math.max(1, Math.ceil(totalRadius / MAX_PER_PASS));
     const perRoundRadius = totalRadius / Math.sqrt(numRounds);
 
@@ -319,7 +323,6 @@ export class GrainWashRenderer {
     const hw = this.fbHalfA!.width;
     const hh = this.fbHalfA!.height;
 
-    // Downsample → blur at half res → upsample to full res (fbA).
     this.renderPass(this.copyProgram, inputTexture, this.fbHalfA!);
 
     const halfRadius = computeBlurRadius(params.blur.intensity, hw, hh);
@@ -387,17 +390,61 @@ export class GrainWashRenderer {
     this.renderToCanvas(params);
   }
 
-  export(
-    format: 'png' | 'jpeg' | 'webp' = 'png',
-    quality = 0.92,
+  private readImageData(): ImageData {
+    const gl = this.gl;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    const raw = new Uint8Array(w * h * 4);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, raw);
+    return new ImageData(flipWebGLPixels(raw, w, h), w, h);
+  }
+
+  private exportViaToBlob(
+    format: 'png' | 'jpeg',
+    quality?: number,
   ): Promise<Blob> {
+    const mime = format === 'jpeg' ? 'image/jpeg' : 'image/png';
     return new Promise((resolve, reject) => {
       this.canvas.toBlob(
         (blob) => { if (blob) resolve(blob); else reject(new Error('Export failed')); },
-        `image/${format}`,
+        mime,
+        format === 'jpeg' ? quality : undefined,
+      );
+    });
+  }
+
+  private exportViaToBlobWebp(quality: number): Promise<Blob> {
+    return new Promise((resolve, reject) => {
+      this.canvas.toBlob(
+        (blob) => { if (blob) resolve(blob); else reject(new Error('Export failed')); },
+        'image/webp',
         quality,
       );
     });
+  }
+
+  private async exportWebp(quality = EXPORT_QUALITY.webp): Promise<Blob> {
+    try {
+      const imageData = this.readImageData();
+      return await encodeImageDataToWebp(imageData, quality);
+    } catch (err) {
+      console.warn('WebP encoder failed, using browser fallback:', err);
+      return this.exportViaToBlobWebp(quality / 100);
+    }
+  }
+
+  export(
+    format: 'png' | 'jpeg' | 'webp' = 'png',
+    quality?: number,
+  ): Promise<Blob> {
+    if (format === 'webp') {
+      return this.exportWebp(quality ?? EXPORT_QUALITY.webp);
+    }
+    return this.exportViaToBlob(
+      format,
+      quality ?? (format === 'jpeg' ? EXPORT_QUALITY.jpeg : undefined),
+    );
   }
 
   destroy() {
